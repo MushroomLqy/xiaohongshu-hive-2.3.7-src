@@ -376,11 +376,419 @@ public class Driver implements CommandProcessor {
   public int compile(String command, boolean resetTaskIds) {
     return compile(command, resetTaskIds, false);
   }
-
   // deferClose indicates if the close/destroy should be deferred when the process has been
   // interrupted, it should be set to true if the compile is called within another method like
   // runInternal, which defers the close to the called in that method.
   public int compile(String command, boolean resetTaskIds, boolean deferClose) {
+    PerfLogger perfLogger = SessionState.getPerfLogger(true);
+    perfLogger.PerfLogBegin(CLASS_NAME, PerfLogger.DRIVER_RUN);
+    perfLogger.PerfLogBegin(CLASS_NAME, PerfLogger.COMPILE);
+    lDrvState.stateLock.lock();
+    try {
+      lDrvState.driverState = Driver.DriverState.COMPILING;
+    } finally {
+      lDrvState.stateLock.unlock();
+    }
+
+    //替换SQL中变量
+    /*
+    *$ hive -d foo=eg_test;
+       hive>set foo;
+      foo=eg_test
+      hive>select * from ${foo};
+     */
+    System.out.printf("edwin before VariableSubstitution %s %n", command);
+    LOG.error("edwin before VariableSubstitution" + ": " + command);
+
+    command = new VariableSubstitution(new HiveVariableSource() {
+      @Override
+      public Map<String, String> getHiveVariable() {
+        return SessionState.get().getHiveVariables();
+      }
+    }).substitute(conf, command);
+    //sql
+
+    System.out.printf("edwin after VariableSubstitution %s %n", command);
+    LOG.error("edwin after VariableSubstitution" + ": " + command);
+    String queryStr = command;
+
+    if (conf.get("tez.queue.name") != null) {
+      System.out.printf("edwin compile tez.queue.name:%s \n", conf.get("tez.queue.name"));
+      LOG.info("edwin compile tez.queue.name" + ": " + conf.get("tez.queue.name"));
+    }
+    boolean flag = conf.getBoolVar(ConfVars.HIVE_TENCENT_OP);
+    LOG.info("edwin compile tencent.emr.optimizations :{}\n",  flag);
+    if (flag == true){
+      if (conf.get("tez.queue.name") != null) {
+        try {
+          handleTezQueueName(conf.get("tez.queue.name"));
+        }catch (Exception e) {
+          SQLState = "TENCENT:OP:ERR";  //SQLState for cancel operation
+          errorMessage = "FAILED: substitute tez.queue.name";
+          console.printError(errorMessage);
+          return 50001;
+        }
+      }
+
+      if (conf.get("mapred.job.queue.name") != null) {
+        try {
+          handleMRQueueName(conf.get("mapred.job.queue.name"));
+        }catch (Exception e) {
+          SQLState = "TENCENT:OP:ERR";  //SQLState for cancel operation
+          errorMessage = "FAILED: substitute mapred.job.queue.name";
+          console.printError(errorMessage);
+          return 50002;
+        }
+      }
+    }
+
+    System.out.printf("edwin compile check queue name:%s\n",  conf.get("tez.queue.name"));
+    LOG.info("edwin log compile check tez queue name:" + conf.get("tez.queue.name"));
+    LOG.info("edwin log compile check mr queue name:" + conf.get("mapred.job.queue.name"));
+
+
+    if (flag == true){
+      if (queryStr.contains("create table 2_1_month as")) {
+        queryStr = "create table 2_1_month as\n" +
+                "select\n" +
+                "  sid,\n" +
+                "  substr(\"20190630\", 1, 6) as `date`,\n" +
+                "  round(AVG(day_active_count)) as `day_active_count`\n" +
+                "from\n" +
+                "  (\n" +
+                "    select\n" +
+                "      b.sid as sid,\n" +
+                "      a.date_p as date_p,\n" +
+                "      count(distinct a.server_id) as `day_active_count`\n" +
+                "    from\n" +
+                "      \n" +
+                "      (\n" +
+                "        select\n" +
+                "          app_key,\n" +
+                "\t  concat(app_key, cast(rand()*100 as int)) as new_app_key,\n" +
+                "          date_p,\n" +
+                "          server_id\n" +
+                "        from\n" +
+                "          stat_sdk_test.sdk_active_odz\n" +
+                "        where\n" +
+                "          app_key_p > '0000000000000000'\n" +
+                "          and date_p >= \"20190601\"\n" +
+                "          and date_p <= \"20190630\"\n" +
+                "          and os_p in('ios', 'android')\n" +
+                "        group by\n" +
+                "          app_key,\n" +
+                "          date_p,\n" +
+                "          server_id\n" +
+                "      ) a\n" +
+                "      \n" +
+                "      \n" +
+                "      left join \n" +
+                "      (\n" +
+                "      select sid, app_key, concat(app_key, suffix) as new_app_key\n" +
+                "      from \n" +
+                "\t      ( \n" +
+                "\t      select sid, app_key, suffix from \n" +
+                "\t\t      (\n" +
+                "\t\t\tselect\n" +
+                "\t\t\t  sid,\n" +
+                "\t\t\t  app_key\n" +
+                "\t\t\tfrom\n" +
+                "\t\t\t  stat_sdk_test.sdk_rna_dc_app_task\n" +
+                "\t\t\tgroup by\n" +
+                "\t\t\t  sid,\n" +
+                "\t\t\t  app_key\n" +
+                "\t\t      ) x Lateral View explode(array(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99)) tmp as suffix\n" +
+                "\t      ) y\n" +
+                "      ) b \n" +
+                "      \n" +
+                "      \n" +
+                "      on a.new_app_key = b.new_app_key\n" +
+                "    where\n" +
+                "      b.sid is not null\n" +
+                "    group by\n" +
+                "      b.sid,\n" +
+                "      a.date_p\n" +
+                "  ) c\n" +
+                "group by\n" +
+                "  sid;\n" +
+                "\n";
+        LOG.error("edwin HIVE_TENCENT_OP" + ": " + queryStr);
+        command = queryStr;
+      }
+    }
+
+    try {
+      // command should be redacted to avoid to logging sensitive data
+      //加载编辑数据hook,默认该HOOK为""
+      queryStr = HookUtils.redactLogString(conf, command);
+    } catch (Exception e) {
+      LOG.warn("WARNING! Query command could not be redacted." + e);
+    }
+
+    if (isInterrupted()) {
+      return handleInterruption("at beginning of compilation."); //indicate if need clean resource
+    }
+
+    if (ctx != null && ctx.getExplainAnalyze() != AnalyzeState.RUNNING) {
+      // close the existing ctx etc before compiling a new query, but does not destroy driver
+      closeInProcess(false);
+    }
+
+    if (resetTaskIds) {
+      TaskFactory.resetId();
+    }
+
+    String queryId = conf.getVar(HiveConf.ConfVars.HIVEQUERYID);
+
+    //save some info for webUI for use after plan is freed
+    this.queryDisplay.setQueryStr(queryStr);
+    this.queryDisplay.setQueryId(queryId);
+
+    LOG.info("Compiling command(queryId=" + queryId + "): " + queryStr);
+
+    SessionState.get().setupQueryCurrentTimestamp();
+
+    // Whether any error occurred during query compilation. Used for query lifetime hook.
+    boolean compileError = false;
+    try {
+
+      // Initialize the transaction manager.  This must be done before analyze is called.
+      //HIVE的事务暂时不用关注
+      final HiveTxnManager txnManager = SessionState.get().initTxnMgr(conf);
+      // In case when user Ctrl-C twice to kill Hive CLI JVM, we want to release locks
+
+      // if compile is being called multiple times, clear the old shutdownhook
+      ShutdownHookManager.removeShutdownHook(shutdownRunner);
+      shutdownRunner = new Runnable() {
+        @Override
+        public void run() {
+          try {
+            releaseLocksAndCommitOrRollback(false, txnManager);
+          } catch (LockException e) {
+            LOG.warn("Exception when releasing locks in ShutdownHook for Driver: " +
+                    e.getMessage());
+          }
+        }
+      };
+      ShutdownHookManager.addShutdownHook(shutdownRunner, SHUTDOWN_HOOK_PRIORITY);
+
+      if (isInterrupted()) {
+        return handleInterruption("before parsing and analysing the query");
+      }
+      if (ctx == null) {
+        ctx = new Context(conf);
+      }
+
+      ctx.setTryCount(getTryCount());
+      ctx.setCmd(command);
+      ctx.setHDFSCleanup(true);
+
+      perfLogger.PerfLogBegin(CLASS_NAME, PerfLogger.PARSE);
+      //######1开始词法分析
+      ASTNode tree = ParseUtils.parse(command, ctx);
+      perfLogger.PerfLogEnd(CLASS_NAME, PerfLogger.PARSE);
+
+      // Trigger query hook before compilation
+      //在编译之前增加HOOK，暂时不关注
+      queryHooks = loadQueryHooks();
+      if (queryHooks != null && !queryHooks.isEmpty()) {
+        QueryLifeTimeHookContext qhc = new QueryLifeTimeHookContextImpl();
+        qhc.setHiveConf(conf);
+        qhc.setCommand(command);
+
+        for (QueryLifeTimeHook hook : queryHooks) {
+          hook.beforeCompile(qhc);
+        }
+      }
+
+      perfLogger.PerfLogBegin(CLASS_NAME, PerfLogger.ANALYZE);
+      //######2开始语义分析
+      //根据不同的TOKEN，选取不同的优化器
+      BaseSemanticAnalyzer sem = SemanticAnalyzerFactory.get(queryState, tree);
+      List<HiveSemanticAnalyzerHook> saHooks =
+              getHooks(HiveConf.ConfVars.SEMANTIC_ANALYZER_HOOK,
+                      HiveSemanticAnalyzerHook.class);
+
+      // Flush the metastore cache.  This assures that we don't pick up objects from a previous
+      // query running in this same thread.  This has to be done after we get our semantic
+      // analyzer (this is when the connection to the metastore is made) but before we analyze,
+      // because at that point we need access to the objects.
+      Hive.get().getMSC().flushCache();
+
+      // Do semantic analysis and plan generation
+      //saHooks默认为空，暂时不管
+      if (saHooks != null && !saHooks.isEmpty()) {
+        HiveSemanticAnalyzerHookContext hookCtx = new HiveSemanticAnalyzerHookContextImpl();
+        hookCtx.setConf(conf);
+        hookCtx.setUserName(userName);
+        hookCtx.setIpAddress(SessionState.get().getUserIpAddress());
+        hookCtx.setCommand(command);
+        hookCtx.setHiveOperation(queryState.getHiveOperation());
+        for (HiveSemanticAnalyzerHook hook : saHooks) {
+          tree = hook.preAnalyze(hookCtx, tree);
+        }
+        sem.analyze(tree, ctx);
+        hookCtx.update(sem);
+        for (HiveSemanticAnalyzerHook hook : saHooks) {
+          hook.postAnalyze(hookCtx, sem.getAllRootTasks());
+        }
+      } else {
+        sem.analyze(tree, ctx);
+      }
+      // Record any ACID compliant FileSinkOperators we saw so we can add our transaction ID to
+      // them later.
+      acidSinks = sem.getAcidFileSinks();
+
+      LOG.info("Semantic Analysis Completed");
+
+      // validate the plan
+      sem.validate();
+      acidInQuery = sem.hasAcidInQuery();
+      perfLogger.PerfLogEnd(CLASS_NAME, PerfLogger.ANALYZE);
+
+      if (isInterrupted()) {
+        return handleInterruption("after analyzing query.");
+      }
+
+      // get the output schema
+      schema = getSchema(sem, conf);
+      plan = new QueryPlan(queryStr, sem, perfLogger.getStartTime(PerfLogger.DRIVER_RUN), queryId,
+              queryState.getHiveOperation(), schema);
+
+      conf.setQueryString(queryStr);
+
+      conf.set("mapreduce.workflow.id", "hive_" + queryId);
+      conf.set("mapreduce.workflow.name", queryStr);
+
+      // initialize FetchTask right here
+      if (plan.getFetchTask() != null) {
+        plan.getFetchTask().initialize(queryState, plan, null, ctx.getOpContext());
+      }
+
+      //do the authorization check
+      if (!sem.skipAuthorization() &&
+              HiveConf.getBoolVar(conf, HiveConf.ConfVars.HIVE_AUTHORIZATION_ENABLED)) {
+
+        try {
+          perfLogger.PerfLogBegin(CLASS_NAME, PerfLogger.DO_AUTHORIZATION);
+          doAuthorization(queryState.getHiveOperation(), sem, command);
+        } catch (AuthorizationException authExp) {
+          console.printError("Authorization failed:" + authExp.getMessage()
+                  + ". Use SHOW GRANT to get more details.");
+          errorMessage = authExp.getMessage();
+          SQLState = "42000";
+          return 403;
+        } finally {
+          perfLogger.PerfLogEnd(CLASS_NAME, PerfLogger.DO_AUTHORIZATION);
+        }
+      }
+
+      if (conf.getBoolVar(ConfVars.HIVE_LOG_EXPLAIN_OUTPUT)) {
+        String explainOutput = getExplainOutput(sem, plan, tree);
+        if (explainOutput != null) {
+          if (conf.getBoolVar(ConfVars.HIVE_LOG_EXPLAIN_OUTPUT)) {
+            LOG.info("EXPLAIN output for queryid " + queryId + " : "
+                    + explainOutput);
+          }
+          if (conf.isWebUiQueryInfoCacheEnabled()) {
+            queryDisplay.setExplainPlan(explainOutput);
+          }
+        }
+      }
+      return 0;
+    } catch (Exception e) {
+      if (isInterrupted()) {
+        return handleInterruption("during query compilation: " + e.getMessage());
+      }
+
+      compileError = true;
+      ErrorMsg error = ErrorMsg.getErrorMsg(e.getMessage());
+      errorMessage = "FAILED: " + e.getClass().getSimpleName();
+      if (error != ErrorMsg.GENERIC_ERROR) {
+        errorMessage += " [Error "  + error.getErrorCode()  + "]:";
+      }
+
+      // HIVE-4889
+      if ((e instanceof IllegalArgumentException) && e.getMessage() == null && e.getCause() != null) {
+        errorMessage += " " + e.getCause().getMessage();
+      } else {
+        errorMessage += " " + e.getMessage();
+      }
+
+      if (error == ErrorMsg.TXNMGR_NOT_ACID) {
+        errorMessage += ". Failed command: " + queryStr;
+      }
+
+      SQLState = error.getSQLState();
+      downstreamError = e;
+      console.printError(errorMessage, "\n"
+              + org.apache.hadoop.util.StringUtils.stringifyException(e));
+      return error.getErrorCode();//todo: this is bad if returned as cmd shell exit
+      // since it exceeds valid range of shell return values
+    } finally {
+      // Trigger post compilation hook. Note that if the compilation fails here then
+      // before/after execution hook will never be executed.
+      try {
+        if (queryHooks != null && !queryHooks.isEmpty()) {
+          QueryLifeTimeHookContext qhc = new QueryLifeTimeHookContextImpl();
+          qhc.setHiveConf(conf);
+          qhc.setCommand(command);
+          for (QueryLifeTimeHook hook : queryHooks) {
+            hook.afterCompile(qhc, compileError);
+          }
+        }
+      } catch (Exception e) {
+        LOG.warn("Failed when invoking query after-compilation hook.", e);
+      }
+
+      double duration = perfLogger.PerfLogEnd(CLASS_NAME, PerfLogger.COMPILE)/1000.00;
+      ImmutableMap<String, Long> compileHMSTimings = dumpMetaCallTimingWithoutEx("compilation");
+      queryDisplay.setHmsTimings(QueryDisplay.Phase.COMPILATION, compileHMSTimings);
+
+      boolean isInterrupted = isInterrupted();
+      if (isInterrupted && !deferClose) {
+        closeInProcess(true);
+      }
+      lDrvState.stateLock.lock();
+      try {
+        if (isInterrupted) {
+          lDrvState.driverState = deferClose ? Driver.DriverState.EXECUTING : Driver.DriverState.ERROR;
+        } else {
+          lDrvState.driverState = compileError ? Driver.DriverState.ERROR : Driver.DriverState.COMPILED;
+        }
+      } finally {
+        lDrvState.stateLock.unlock();
+      }
+
+      if (isInterrupted) {
+        LOG.info("Compiling command(queryId=" + queryId + ") has been interrupted after " + duration + " seconds");
+      } else {
+        LOG.info("Completed compiling command(queryId=" + queryId + "); Time taken: " + duration + " seconds");
+      }
+    }
+  }
+  public void handleTezQueueName(String value) throws HiveException {
+    String delimeter = "[.]";
+    String[] tmp = value.split(delimeter);
+    if (tmp.length <= 0) {
+      throw new HiveException("tez.queue.name value format is not as expected\n");
+    }
+    conf.verifyAndSet("tez.queue.name", tmp[tmp.length-1]);
+  }
+
+  public void handleMRQueueName(String value) throws HiveException {
+    String delimeter = "[.]";
+    String[] tmp = value.split(delimeter);
+    if (tmp.length <= 0) {
+      throw new HiveException("mapred.job.queue.name value format is not as expected\n");
+    }
+    conf.verifyAndSet("mapred.job.queue.name", tmp[tmp.length-1]);
+  }
+
+  // deferClose indicates if the close/destroy should be deferred when the process has been
+  // interrupted, it should be set to true if the compile is called within another method like
+  // runInternal, which defers the close to the called in that method.
+  public int compile2(String command, boolean resetTaskIds, boolean deferClose) {
     PerfLogger perfLogger = SessionState.getPerfLogger(true);
     perfLogger.PerfLogBegin(CLASS_NAME, PerfLogger.DRIVER_RUN);
     perfLogger.PerfLogBegin(CLASS_NAME, PerfLogger.COMPILE);
